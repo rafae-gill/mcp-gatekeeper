@@ -20,13 +20,18 @@ STORE_PATH = os.path.join(os.path.dirname(__file__), "demo-store.json")
 PERMISSIONS = {
     "warehouse": {
         "access": "user",
+        # Which tools this person may call.
         "tools": ["health_check", "whoami", "run_query"],
-        # Office hours in a named zone. Wraps past midnight if you want it to.
+        # When. Office hours in a named zone; wraps past midnight if you want.
         "hours_from": 0, "hours_to": 0,          # 0/0 = always, for the demo
         "hours_tz": "UTC",
-        # Server-specific knobs ride along untouched in `extra`.
-        "statement_timeout_s": 120,
+        # How often, and how much at once. Enforced by the gate.
+        "max_calls_per_minute": 30,
+        "max_calls_per_day": 2000,
         "max_concurrent": 4,
+        # Which data. Anything else rides along to the tools, which enforce
+        # it: the demo warehouse lets this key read these tables and no others.
+        "tables": ["sales", "customers"],
     },
     "ledger": {"access": "none", "tools": []},
 }

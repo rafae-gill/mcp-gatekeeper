@@ -1,41 +1,66 @@
 # mcp-gatekeeper
 
-**Control which people can use which AI tools, and keep a record of who used what.**
+**Let your team's AI agents use company data, but only the parts each person should see.**
 
-[MCP](https://modelcontextprotocol.io) servers give AI agents tools: run a SQL query, create
-an invoice, post to Slack. That's simple when it's just you on your laptop. Once a whole team
-shares those servers, simple questions come up that MCP doesn't answer:
+Companies have a lot of data: sales, customers, payroll, finance. Plugging it into AI with
+[MCP](https://modelcontextprotocol.io) is easy. The catch is that most MCP servers are
+all-or-nothing: once someone is connected, they get every tool and every table the server can
+reach. Almost nobody should have that.
 
-- **Who can use which tools?** Sam can query the warehouse but must not write to the ledger.
-- **When?** Not at 3 am, while the nightly data load is running.
-- **Who did what?** Someone created that invoice. Who?
-- **How do I cut someone off?** Right now, without redeploying anything.
+mcp-gatekeeper sits in front of your MCP servers and lets you decide, **person by person**:
 
-**mcp-gatekeeper answers them.** It sits in front of your MCP server. Every person gets their
-own key, and every tool call is checked against what that key allows before it runs:
+| | For example |
+|---|---|
+| **Which tools** | Analysts can `run_query`; only admins can `create_invoice`. |
+| **Which data** | Analysts read `sales` and `customers`; only Finance reads `payroll`. |
+| **When** | 09:00–18:00, Monday to Friday, in their timezone. Never during the nightly data load. |
+| **How often** | 30 calls a minute, 2,000 a day, 4 at once, so a looping agent can't hammer the warehouse. |
+| **Who did what** | Every call, allowed or refused, goes in the audit log. |
+
+**And you change any of it live.** Access lives on each person's key, not in code. Grant a
+tool, add a table, tighten a limit or cut someone off: it's one update, and their next call
+follows the new rules. Nothing is redeployed.
+
+![One warehouse MCP server shared by a team: each person's key decides what they can do](docs/use-case.svg)
+
+## Built from a real deployment
+
+This is the open-source core of a platform running in production: five MCP servers, including
+one in front of a Redshift data warehouse, used every day by about 50 people. Each person's key
+decides which tools they get, which warehouse views they can query, when, and how often, and
+every call lands in an audit log. Changing someone's access takes seconds and no deploy.
+
+![Demo: a key is issued through a claim link, then tool calls are allowed, refused and audited](docs/demo.gif)
+
+A key's policy for one server looks like this:
+
+```jsonc
+"warehouse": {
+  "tools": ["run_query", "describe_table"],    // which tools
+  "tables": ["sales", "customers"],            // which data: your tool reads this and enforces it
+  "hours_from": 9, "hours_to": 18, "hours_tz": "UTC",
+  "allowed_weekdays": [0, 1, 2, 3, 4],         // Mon–Fri
+  "max_calls_per_minute": 30, "max_calls_per_day": 2000, "max_concurrent": 4
+}
+```
+
+What an agent sees when it calls a tool:
 
 | The agent tries to… | What happens |
 |---|---|
 | call any tool without a valid key | `401`. Nothing runs. |
 | call a tool its key allows | It runs, and the call is logged. |
-| call a tool its key doesn't allow | Refused with a message the agent can pass on ("Ask an admin to update your key"), and logged. |
-| call a tool outside its allowed hours | Refused with the hours and timezone, and logged. |
-
-![Demo: a key is issued through a claim link, then tool calls are allowed, refused and audited](docs/demo.gif)
-
-Access is just data on the key, so changing what someone can do is an update in the
-database, with no redeploy:
-
-```jsonc
-"warehouse": { "tools": ["run_query", "describe_table"], "hours_from": 9, "hours_to": 18, "hours_tz": "UTC" }
-```
+| call a tool its key doesn't allow | Refused with a message it can pass on ("Ask an admin to update your key"), and logged. |
+| call outside its hours | Refused with its hours and timezone, and logged. |
+| go over its limits | Refused with when to try again ("Try again in 12s"), and logged. |
 
 **Who it's for:** teams running MCP servers over HTTP for more than one person, especially
 servers that can touch production data. If it's one person on stdio, you don't need this yet.
 
 **Why not just OAuth?** The MCP spec points to OAuth 2.1, which proves *who* is calling. It
-doesn't decide which of thirty tools that person may use, when, or what gets recorded. That
-part is still yours to build, and this is that part.
+doesn't decide which of thirty tools that person may use, which data they see, when, or how
+often, and it doesn't record what they did. That part is still yours to build, and this is that
+part.
 
 ## Add it to your server
 
@@ -58,11 +83,31 @@ app = Gatekeeper(
 uvicorn.run(app, host="0.0.0.0", port=8080)
 ```
 
-That's the whole integration: your tools don't change. Clients send their key as
-`x-api-key: sk_…` or `Authorization: Bearer sk_…`. `GET /health` stays open for uptime checks.
+That's the whole integration for tools, hours, limits and the audit log: your tools don't
+change. Clients send their key as `x-api-key: sk_…` or `Authorization: Bearer sk_…`.
+`GET /health` stays open for uptime checks.
+
+**Scoping data per person** takes one more step, because only your tool knows what "a table"
+or "a view" means. The tool asks who is calling and applies that key's scope:
+
+```python
+from mcp_gatekeeper import current_principal
+
+@mcp.tool()
+def run_query(sql: str, ctx: Context) -> str:
+    who = current_principal(ctx)                  # the validated caller
+    tables = who.policy.extra.get("tables", [])   # this key's data scope
+    ...
+```
+
+Enforce that scope in the database, not by inspecting the SQL text. In
+[`examples/server.py`](examples/server.py), SQLite itself refuses any table outside the key's
+list: joins, subqueries and system tables included, and writes are refused outright. On
+Redshift or Postgres, the same idea is to map each key to a database role
+(`"db_role": "analyst_ro"`) and let `GRANT`s on views decide.
 
 > **Status: alpha.** Small, readable, tested against the MCP Python SDK 1.x and 2.x.
-> Maintained on a best-effort basis — it is a reference implementation to read and adapt,
+> Maintained on a best-effort basis: it's a reference implementation to read and adapt,
 > not a supported product.
 
 ## Try it
@@ -76,8 +121,13 @@ python examples/server.py        # serves on :8080
 
 # in another terminal
 python examples/call.py whoami                          # 401
-python examples/call.py whoami --key sk_…               # runs
+python examples/call.py whoami --key sk_…               # runs: who you are, which tables
+python examples/call.py run_query --key sk_… -a sql="select * from sales"     # rows
+python examples/call.py run_query --key sk_… -a sql="select * from payroll"   # ACCESS DENIED
 python examples/call.py drop_everything --key sk_…      # refused, and logged
+
+# now give yourself payroll: in examples/demo-store.json, add "payroll" to your
+# key's "tables" and save. The very next call can read it. No restart.
 
 # or the raw request:
 
@@ -107,8 +157,10 @@ curl -s -X POST localhost:8080/mcp \
       "tools": ["run_query", "health_check"],
       "hours_tz": "UTC",
       "hours_from": 10, "hours_to": 3,     // wraps past midnight
-      "statement_timeout_s": 120,          // your server reads this from `extra`
-      "max_concurrent": 4
+      "max_calls_per_minute": 30,          // enforced by the gate
+      "max_concurrent": 4,                 // enforced by the gate
+      "tables": ["sales"],                 // anything else: your tools read it
+      "statement_timeout_s": 120           //   via current_principal(ctx).policy.extra
     },
     "ledger": { "access": "none", "tools": [] }
   }
@@ -119,8 +171,9 @@ Changing someone's access is a write to the store. No redeploy. The people who g
 stop being the people who deploy — which is the whole point, and the best decision in the
 design.
 
-Unrecognised fields ride along in `policy.extra` untouched, so your server can enforce knobs
-the gatekeeper has never heard of.
+Unrecognised fields ride along in `policy.extra` untouched, and tools read them with
+`current_principal(ctx)`. That's how one key carries "these tables", "this database role" or
+"this statement timeout" without the gatekeeper knowing what any of them mean.
 
 ### 2. Never email a key — email a claim link
 
@@ -250,7 +303,11 @@ clicks in the same second minting two keys.
 - **Not novel security work.** Scoped tokens, hashed secrets and one-time claim links are
   textbook. The contribution is applying them to MCP, where almost nobody has, and reporting
   what broke.
-- **Not a rate limiter.** `extra` carries your limits; enforcing them is the server's job.
+- **Not a distributed rate limiter.** Calls-per-minute, per-day and concurrency limits are
+  counted in the server process's memory: exact for one process, but N replicas allow up to N×
+  the limit, and a restart resets the counts.
+- **Not a data-access layer.** The gate knows tools, not tables. Scoping data is your tool's
+  job, using the key's policy (see "Scoping data per person" above).
 - **Not multi-tenant.** No notion of organizations.
 
 ## Provenance
@@ -271,7 +328,7 @@ whole suite weekly against the newest SDK and against 1.x — the SDK moving und
 likeliest way for this to break.
 
 ```
-69 passed, 11 skipped in 1.81s       # the skips are the Postgres runs; set GK_TEST_POSTGRES_DSN
+80 passed, 11 skipped in 1.39s       # the skips are the Postgres runs; set GK_TEST_POSTGRES_DSN
 ```
 
 ## License

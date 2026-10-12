@@ -486,6 +486,172 @@ def test_allowed_call_is_refused_if_it_cannot_be_audited():
     assert app.seen is None
 
 
+# ---------------------------------------------------------- usage limits ---
+
+def limited(**limits):
+    store = MemoryStore()
+    perms = {"warehouse": {"tools": ["run_query"], **limits}}
+    secret, _ = mint_key(store, name="Agent", email="agent@example.com", permissions=perms)
+    return store, secret
+
+
+def text_of(out):
+    return json.loads(out.body)["result"]["content"][0]["text"]
+
+
+def test_calls_per_minute_limit_refuses_then_recovers():
+    from mcp_gatekeeper import Limiter
+    store, secret = limited(max_calls_per_minute=3)
+    audit = ListAudit()
+    gate = Gatekeeper(EchoApp(), server_name="warehouse", store=store, audit=audit)
+    t = [1000.0]
+    gate.limiter = Limiter(clock=lambda: t[0])
+
+    for _ in range(3):
+        assert json.loads(asyncio.run(call(gate, key=secret, body=tool_call("run_query"))).body) == {"ok": True}
+    refused = asyncio.run(call(gate, key=secret, body=tool_call("run_query")))
+    assert text_of(refused).startswith("RATE LIMITED: this key may make 3 calls per minute")
+    assert audit.actions()[-1] == "denied:rate"
+
+    t[0] += 61
+    assert json.loads(asyncio.run(call(gate, key=secret, body=tool_call("run_query"))).body) == {"ok": True}
+
+
+def test_calls_per_day_limit():
+    from mcp_gatekeeper import Limiter
+    store, secret = limited(max_calls_per_day=2)
+    gate = Gatekeeper(EchoApp(), server_name="warehouse", store=store)
+    t = [0.0]
+    gate.limiter = Limiter(clock=lambda: t[0])
+    for _ in range(2):
+        asyncio.run(call(gate, key=secret, body=tool_call("run_query")))
+        t[0] += 3600
+    out = asyncio.run(call(gate, key=secret, body=tool_call("run_query")))
+    assert "2 calls per day" in text_of(out)
+
+
+def test_refused_calls_do_not_use_up_quota():
+    store, secret = limited(max_calls_per_minute=1)
+    gate = Gatekeeper(EchoApp(), server_name="warehouse", store=store)
+    for _ in range(3):
+        asyncio.run(call(gate, key=secret, body=tool_call("not_granted")))
+    ok = asyncio.run(call(gate, key=secret, body=tool_call("run_query")))
+    assert json.loads(ok.body) == {"ok": True}
+
+
+def test_concurrency_limit_and_slot_release():
+    store, secret = limited(max_concurrent=1)
+
+    async def scenario():
+        gate_open = asyncio.Event()
+
+        class SlowApp(EchoApp):
+            async def __call__(self, scope, receive, send):
+                await gate_open.wait()
+                await super().__call__(scope, receive, send)
+
+        gate = Gatekeeper(SlowApp(), server_name="warehouse", store=store)
+        first = asyncio.create_task(call(gate, key=secret, body=tool_call("run_query")))
+        for _ in range(200):                      # until the first call holds the slot
+            if sum(gate.limiter._running.values()) == 1:
+                break
+            await asyncio.sleep(0.01)
+        busy = await call(gate, key=secret, body=tool_call("run_query"))
+        gate_open.set()
+        await first
+        again = await call(gate, key=secret, body=tool_call("run_query"))
+        return busy, again
+
+    busy, again = asyncio.run(scenario())
+    assert text_of(busy).startswith("BUSY")
+    assert json.loads(again.body) == {"ok": True}
+
+
+def test_concurrency_slot_is_released_when_the_server_crashes():
+    store, secret = limited(max_concurrent=1)
+
+    class Crash(EchoApp):
+        async def __call__(self, scope, receive, send):
+            raise RuntimeError("tool blew up")
+
+    gate = Gatekeeper(Crash(), server_name="warehouse", store=store)
+    for _ in range(2):
+        with pytest.raises(RuntimeError):
+            asyncio.run(call(gate, key=secret, body=tool_call("run_query")))
+    assert sum(gate.limiter._running.values()) == 0
+
+
+def test_limits_are_read_live_from_the_key():
+    """Tightening a limit is a store write, like changing tools."""
+    store, secret = limited()
+    gate = Gatekeeper(EchoApp(), server_name="warehouse", store=store)
+    asyncio.run(call(gate, key=secret, body=tool_call("run_query")))
+    rec = list(store.keys.values())[0]
+    rec.permissions["warehouse"]["max_calls_per_minute"] = 1
+    store.put_key(rec)
+    asyncio.run(call(gate, key=secret, body=tool_call("run_query")))
+    out = asyncio.run(call(gate, key=secret, body=tool_call("run_query")))
+    assert "RATE LIMITED" in text_of(out)
+
+
+# ------------------------------------------------- typos fail soft, not shut --
+
+def test_unreadable_schedule_does_not_lock_the_key_out():
+    """`"hours_from": "9am"` used to raise during key validation: a 401 on
+    every request, from a field that is documented to fail OPEN."""
+    store = MemoryStore()
+    secret, _ = mint_key(store, name="T", email="t@example.com", permissions={
+        "warehouse": {"tools": ["run_query"], "hours_from": "9am", "hours_to": 17,
+                      "max_calls_per_minute": "lots"}})
+    p = validate_key(store, secret, "warehouse")
+    assert p is not None
+    assert p.policy.max_calls_per_minute == 0
+
+
+# ------------------------------------------------- live edits to keys.json --
+
+def test_jsonfile_picks_up_hand_edits_and_ignores_broken_ones(tmp_path):
+    import os
+    from mcp_gatekeeper import JsonFileStore
+    path = tmp_path / "keys.json"
+    store = JsonFileStore(str(path))
+    secret, rec = mint_key(store, name="Sam", email="s@example.com",
+                           permissions={"warehouse": {"tools": ["run_query"]}})
+
+    def edit(mutate, bump):
+        data = json.loads(path.read_text())
+        mutate(data)
+        path.write_text(json.dumps(data))
+        st = os.stat(path)
+        os.utime(path, ns=(st.st_atime_ns, st.st_mtime_ns + bump * 1_000_000_000))
+
+    edit(lambda d: d["keys"][0]["permissions"]["warehouse"]["tools"].append("drop_table"), 1)
+    assert validate_key(store, secret, "warehouse").grants("drop_table")
+
+    path.write_text("{ half-saved")
+    st = os.stat(path)
+    os.utime(path, ns=(st.st_atime_ns, st.st_mtime_ns + 5_000_000_000))
+    assert validate_key(store, secret, "warehouse").grants("drop_table")   # previous contents
+
+
+def test_jsonfile_touch_does_not_overwrite_an_admin_edit(tmp_path):
+    import os
+    from mcp_gatekeeper import JsonFileStore
+    path = tmp_path / "keys.json"
+    store = JsonFileStore(str(path))
+    secret, rec = mint_key(store, name="Sam", email="s@example.com",
+                           permissions={"warehouse": {"tools": ["run_query"]}})
+    data = json.loads(path.read_text())
+    data["keys"][0]["active"] = False                       # admin revokes by hand
+    path.write_text(json.dumps(data))
+    st = os.stat(path)
+    os.utime(path, ns=(st.st_atime_ns, st.st_mtime_ns + 1_000_000_000))
+
+    store.touch_key(rec.key_id)                             # a request lands
+    assert json.loads(path.read_text())["keys"][0]["active"] is False
+    assert validate_key(store, secret, "warehouse") is None
+
+
 if __name__ == "__main__":
     import sys
     sys.exit(pytest.main([__file__, "-q"]))

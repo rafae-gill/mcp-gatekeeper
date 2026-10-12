@@ -117,6 +117,79 @@ def test_batch_is_refused(server):
     assert r.status_code == 400
 
 
+def call_tool(client, secret, name, **arguments):
+    r = client.post("/mcp", headers=headers(secret),
+                    json=rpc("tools/call", {"name": name, "arguments": arguments}))
+    return r.json()["result"]
+
+
+def test_tools_can_see_who_is_calling():
+    """current_principal(ctx) gives the tool the validated caller."""
+    from mcp_gatekeeper import current_principal
+    try:
+        from mcp.server.mcpserver import Context
+    except ImportError:
+        from mcp.server.fastmcp import Context
+
+    srv = Server("who")
+
+    @srv.tool()
+    def me(ctx: Context) -> str:
+        p = current_principal(ctx)
+        return "%s|%s" % (p.name, ",".join(p.policy.extra["tables"]))
+
+    try:
+        app = srv.streamable_http_app(stateless_http=True, json_response=True)
+    except TypeError:
+        srv.settings.stateless_http = True
+        srv.settings.json_response = True
+        app = srv.streamable_http_app()
+    store = MemoryStore()
+    secret, _ = mint_key(store, name="Ana", email="ana@example.com",
+                         permissions={"warehouse": {"tools": ["me"], "tables": ["sales"]}})
+    with TestClient(Gatekeeper(app, server_name="warehouse", store=store),
+                    base_url="http://127.0.0.1:8080") as c:
+        assert call_tool(c, secret, "me")["content"][0]["text"] == "Ana|sales"
+
+
+def _example_server():
+    import importlib.util
+    from pathlib import Path
+    path = Path(__file__).resolve().parent.parent / "examples" / "server.py"
+    spec = importlib.util.spec_from_file_location("example_server", path)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def test_example_warehouse_gives_each_key_its_own_data():
+    """The README's main example, run for real: same tool, two people,
+    different data — and a change to a key's policy applies on the next call."""
+    ex = _example_server()
+    store = MemoryStore()
+    tools = ["whoami", "run_query"]
+    analyst, rec = mint_key(store, name="Analyst", email="a@example.com",
+                            permissions={"warehouse": {"tools": tools, "tables": ["sales"]}})
+    finance, _ = mint_key(store, name="Finance", email="f@example.com",
+                          permissions={"warehouse": {"tools": tools,
+                                                     "tables": ["sales", "payroll"]}})
+    gate = Gatekeeper(ex.http_app(), server_name="warehouse", store=store)
+    q = "select sum(salary) from payroll"
+    with TestClient(gate, base_url="http://127.0.0.1:8080") as c:
+        assert call_tool(c, finance, "run_query", sql=q)["content"][0]["text"] == "11300"
+        denied = call_tool(c, analyst, "run_query", sql=q)
+        assert denied["isError"] is True
+        assert "ACCESS DENIED" in denied["content"][0]["text"]
+        assert "sales" in denied["content"][0]["text"]
+        assert call_tool(c, analyst, "run_query",
+                         sql="select count(*) from sales")["content"][0]["text"] == "3"
+
+        # Grant payroll to the analyst: a store write, no restart.
+        rec.permissions["warehouse"]["tables"].append("payroll")
+        store.put_key(rec)
+        assert call_tool(c, analyst, "run_query", sql=q)["content"][0]["text"] == "11300"
+
+
 def test_registry_check_against_real_tools_list(server):
     import asyncio
     srv, *_ = server

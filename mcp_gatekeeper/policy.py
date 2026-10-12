@@ -17,6 +17,31 @@ WEEKDAY_NAMES = ("Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun")
 DEFAULT_TZ = "UTC"
 
 
+def _lenient_int(d: dict, name: str) -> int:
+    """Schedule and limit knobs: a typo means "knob off", never "locked out".
+
+    An earlier version ran plain int() here, so `"hours_from": "9am"` raised
+    during key validation and the key got a 401 on every request — the exact
+    outcome the fail-open schedule was meant to prevent, just one step earlier.
+    """
+    v = d.get(name)
+    if v in (None, ""):
+        return 0
+    try:
+        return int(v)
+    except (TypeError, ValueError):
+        log.warning("ignoring unreadable %s=%r; treating it as not set", name, v)
+        return 0
+
+
+def _lenient_days(v) -> list[int]:
+    try:
+        return [int(x) for x in (v or [])]
+    except (TypeError, ValueError):
+        log.warning("ignoring unreadable allowed_weekdays=%r", v)
+        return []
+
+
 @dataclass
 class ServerPolicy:
     """Per-server permissions carried on a key.
@@ -26,10 +51,10 @@ class ServerPolicy:
     cannot be granted to anyone still works for a wildcard holder, so the person
     testing never sees the failure their colleagues hit. See `reconcile.py`.
 
-    `extra` carries server-specific knobs (query timeouts, concurrency ceilings,
-    row limits). The gatekeeper does not interpret them; it hands them to the
-    server, which enforces what it understands. Adding a knob needs no change
-    here.
+    `extra` carries server-specific knobs (which tables or views a key may
+    read, query timeouts, row limits). The gatekeeper does not interpret them;
+    tools read them via `current_principal(ctx).policy.extra` and enforce what
+    they understand. Adding a knob needs no change here.
     """
 
     access: str = "user"
@@ -41,6 +66,11 @@ class ServerPolicy:
     minutes_to: int = 0
     hours_tz: str = DEFAULT_TZ
     allowed_weekdays: list[int] = field(default_factory=list)
+
+    # Usage limits, enforced by the gate (see limits.py). 0 = no limit.
+    max_calls_per_minute: int = 0
+    max_calls_per_day: int = 0
+    max_concurrent: int = 0
 
     extra: dict = field(default_factory=dict)
 
@@ -63,16 +93,20 @@ class ServerPolicy:
             return None
 
         known = {"access", "tools", "hours_from", "hours_to", "minutes_from",
-                 "minutes_to", "hours_tz", "allowed_weekdays"}
+                 "minutes_to", "hours_tz", "allowed_weekdays",
+                 "max_calls_per_minute", "max_calls_per_day", "max_concurrent"}
         return cls(
             access=str(d.get("access", "user")),
             tools=list(d.get("tools") or []),
-            hours_from=int(d.get("hours_from") or 0),
-            hours_to=int(d.get("hours_to") or 0),
-            minutes_from=int(d.get("minutes_from") or 0),
-            minutes_to=int(d.get("minutes_to") or 0),
+            hours_from=_lenient_int(d, "hours_from"),
+            hours_to=_lenient_int(d, "hours_to"),
+            minutes_from=_lenient_int(d, "minutes_from"),
+            minutes_to=_lenient_int(d, "minutes_to"),
             hours_tz=str(d.get("hours_tz") or DEFAULT_TZ),
-            allowed_weekdays=[int(x) for x in (d.get("allowed_weekdays") or [])],
+            allowed_weekdays=_lenient_days(d.get("allowed_weekdays")),
+            max_calls_per_minute=_lenient_int(d, "max_calls_per_minute"),
+            max_calls_per_day=_lenient_int(d, "max_calls_per_day"),
+            max_concurrent=_lenient_int(d, "max_concurrent"),
             extra={k: v for k, v in d.items() if k not in known},
         )
 

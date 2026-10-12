@@ -20,13 +20,17 @@ import sys
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
+import sqlite3
+
 try:                                    # mcp >= 2
-    from mcp.server.mcpserver import MCPServer as Server
+    from mcp.server.mcpserver import Context, MCPServer as Server
+    from mcp.server.mcpserver.exceptions import ToolError
 except ImportError:                     # mcp 1.x
-    from mcp.server.fastmcp import FastMCP as Server
+    from mcp.server.fastmcp import Context, FastMCP as Server
+    from mcp.server.fastmcp.exceptions import ToolError
 
 from mcp_gatekeeper import (Gatekeeper, JsonFileStore, PrintAudit,
-                            assert_grantable)
+                            assert_grantable, current_principal)
 
 STORE_PATH = os.path.join(os.path.dirname(__file__), "demo-store.json")
 SERVER_NAME = "warehouse"
@@ -45,15 +49,60 @@ def health_check() -> str:
 
 
 @mcp.tool()
-def whoami() -> str:
-    """Cheap tool to prove a key works."""
-    return "you reached the demo warehouse server"
+def whoami(ctx: Context) -> str:
+    """Who the warehouse thinks you are, and which tables you can read."""
+    who = current_principal(ctx)
+    return "you are %s; tables you can read: %s" % (
+        who.name, ", ".join(who.policy.extra.get("tables", [])) or "none")
+
+
+# A tiny stand-in for a data warehouse. In real life this is Redshift,
+# Postgres, Snowflake...
+WAREHOUSE = {
+    "sales":     ("region TEXT, amount INT", [("north", 120), ("south", 80), ("east", 95)]),
+    "customers": ("name TEXT, region TEXT", [("Acme", "north"), ("Globex", "south")]),
+    "payroll":   ("employee TEXT, salary INT", [("Sam", 5200), ("Ana", 6100)]),
+}
 
 
 @mcp.tool()
-def run_query(sql: str) -> str:
-    """Pretend to query something."""
-    return "would run: %s" % sql[:200]
+def run_query(sql: str, ctx: Context) -> str:
+    """Run a read-only SQL query against the warehouse."""
+    who = current_principal(ctx)
+    if who is None:                      # not behind the gate: refuse, don't guess
+        raise ToolError("ACCESS DENIED: no caller identity.")
+    allowed = set(who.policy.extra.get("tables", []))
+
+    db = sqlite3.connect(":memory:")
+    for name, (cols, rows) in WAREHOUSE.items():
+        db.execute("CREATE TABLE %s (%s)" % (name, cols))
+        db.executemany("INSERT INTO %s VALUES (%s)" % (name, ",".join("?" * len(rows[0]))), rows)
+
+    # The DATABASE enforces this key's scope, not string matching on the SQL:
+    # SQLite asks us about every table the query touches, and anything outside
+    # the key's `tables` — or any write at all — is refused by the engine.
+    # On Redshift/Postgres the same idea is: map the key to a database role and
+    # let GRANTs on views do it (e.g. `extra: {"db_role": "analyst_ro"}`).
+    def authorize(action, arg1, arg2, dbname, source):
+        if action == sqlite3.SQLITE_READ:
+            return sqlite3.SQLITE_OK if arg1 in allowed else sqlite3.SQLITE_DENY
+        if action in (sqlite3.SQLITE_SELECT, sqlite3.SQLITE_FUNCTION):
+            return sqlite3.SQLITE_OK
+        return sqlite3.SQLITE_DENY
+
+    db.set_authorizer(authorize)
+    try:
+        rows = db.execute(sql).fetchmany(50)
+    except sqlite3.DatabaseError as e:
+        if "not authorized" in str(e) or "prohibited" in str(e):
+            # ToolError marks the result as an error (isError), so the agent
+            # doesn't mistake a refusal for an answer.
+            raise ToolError("ACCESS DENIED: your key can't read that. Tables you can "
+                            "read: %s." % (", ".join(sorted(allowed)) or "none"))
+        raise ToolError("query error: %s" % e)
+    finally:
+        db.close()
+    return "\n".join(", ".join(str(v) for v in r) for r in rows) or "(no rows)"
 
 
 @mcp.tool()

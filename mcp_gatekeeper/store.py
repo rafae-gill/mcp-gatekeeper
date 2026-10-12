@@ -11,11 +11,14 @@ methods.
 from __future__ import annotations
 
 import json
+import logging
 import os
 import threading
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from typing import Protocol
+
+log = logging.getLogger("mcp_gatekeeper")
 
 
 def _now() -> datetime:
@@ -139,17 +142,46 @@ class MemoryStore:
 class JsonFileStore(MemoryStore):
     """MemoryStore that persists to a JSON file after every write.
 
-    For small deployments and for trying this out. Not for concurrent writers.
+    For small deployments and for trying this out. Not for several processes
+    writing at once.
+
+    Edits to the file are picked up live: change a key's tools or limits in
+    the JSON, save, and the next request uses them — no restart. An edit
+    that doesn't parse (half-saved, a typo) is ignored with a warning and the
+    previous contents stay in force, rather than locking everyone out.
     """
+
+    TOUCH_INTERVAL_S = 60
 
     def __init__(self, path: str) -> None:
         super().__init__()
         self.path = path
         # Requests run store calls on worker threads; two saves racing on the
-        # same .tmp file would corrupt it.
-        self._save_lock = threading.Lock()
+        # same .tmp file would corrupt it, and a save must never overwrite an
+        # edit it hasn't loaded yet.
+        self._file_lock = threading.RLock()
+        self._mtime = None
         if os.path.exists(path):
             self._load()
+
+    def _file_mtime(self):
+        try:
+            return os.stat(self.path).st_mtime_ns
+        except FileNotFoundError:
+            return None
+
+    def _refresh(self) -> None:
+        """Reload if the file changed under us (an admin edited it)."""
+        with self._file_lock:
+            m = self._file_mtime()
+            if m is None or m == self._mtime:
+                return
+            try:
+                self._load()
+            except (ValueError, KeyError, TypeError) as e:
+                log.warning("ignoring unreadable edit to %s (%s); keeping the "
+                            "previous contents", self.path, e)
+                self._mtime = m
 
     def _iso(self, v):
         return v.isoformat() if isinstance(v, datetime) else v
@@ -158,16 +190,21 @@ class JsonFileStore(MemoryStore):
         return datetime.fromisoformat(v) if isinstance(v, str) else v
 
     def _load(self) -> None:
+        m = self._file_mtime()
         with open(self.path, encoding="utf-8") as f:
             raw = json.load(f)
+        keys, invites = {}, {}
         for d in raw.get("keys", []):
             for k in ("created_at", "last_used"):
                 d[k] = self._dt(d.get(k))
-            self.keys[d["key_id"]] = KeyRecord(**d)
+            keys[d["key_id"]] = KeyRecord(**d)
         for d in raw.get("invites", []):
             for k in ("expires_at", "created_at", "claimed_at"):
                 d[k] = self._dt(d.get(k))
-            self.invites[d["invite_id"]] = InviteRecord(**d)
+            invites[d["invite_id"]] = InviteRecord(**d)
+        # Swap only once the whole file parsed: a broken edit changes nothing.
+        self.keys, self.invites = keys, invites
+        self._mtime = m
 
     def _save(self) -> None:
         def enc(rec):
@@ -175,27 +212,60 @@ class JsonFileStore(MemoryStore):
             return {k: self._iso(v) for k, v in d.items()}
 
         tmp = self.path + ".tmp"
-        with self._save_lock:
+        with self._file_lock:
             with open(tmp, "w", encoding="utf-8") as f:
                 json.dump({"keys": [enc(r) for r in list(self.keys.values())],
                            "invites": [enc(r) for r in list(self.invites.values())]},
                           f, indent=1)
             os.replace(tmp, self.path)
+            self._mtime = self._file_mtime()
+
+    # Reads pick up outside edits; writes do too, first, so they never
+    # overwrite an edit they haven't seen.
+
+    def find_key_by_hash(self, key_hash):
+        self._refresh()
+        return super().find_key_by_hash(key_hash)
+
+    def find_invite_by_token_hash(self, token_hash):
+        self._refresh()
+        return super().find_invite_by_token_hash(token_hash)
+
+    def get_invite(self, invite_id):
+        self._refresh()
+        return super().get_invite(invite_id)
 
     def touch_key(self, key_id):
-        super().touch_key(key_id); self._save()
+        # `last_used` is written at most once a minute per key. Rewriting the
+        # whole file on every request would be slow, and would race with an
+        # admin editing it.
+        with self._file_lock:
+            self._refresh()
+            rec = self.keys.get(key_id)
+            if rec is None:
+                return
+            last = rec.last_used
+            if last and (_now() - last).total_seconds() < self.TOUCH_INTERVAL_S:
+                return
+            super().touch_key(key_id)
+            self._save()
 
     def put_key(self, record):
-        super().put_key(record); self._save()
+        with self._file_lock:
+            self._refresh(); super().put_key(record); self._save()
 
     def set_key_active(self, key_id, active):
-        ok = super().set_key_active(key_id, active); self._save(); return ok
+        with self._file_lock:
+            self._refresh(); ok = super().set_key_active(key_id, active); self._save()
+            return ok
 
     def put_invite(self, record):
-        super().put_invite(record); self._save()
+        with self._file_lock:
+            self._refresh(); super().put_invite(record); self._save()
 
     def claim_invite_atomic(self, invite_id, key):
-        super().claim_invite_atomic(invite_id, key); self._save()
+        with self._file_lock:
+            self._refresh(); super().claim_invite_atomic(invite_id, key); self._save()
 
 
 class InviteError(Exception):

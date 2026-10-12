@@ -13,6 +13,7 @@ import json
 import logging
 
 from .audit import AuditSink, NullAudit
+from .limits import Limiter
 from .policy import Principal, ServerPolicy
 from .store import Store
 from .keys import hash_secret
@@ -38,6 +39,25 @@ async def _offload(fn, *args):
 
 HEADER = b"x-api-key"
 OPEN_PATHS = ("/health", "/healthz")
+STATE_KEY = "gatekeeper_principal"
+
+
+def current_principal(ctx) -> Principal | None:
+    """Who is calling, from inside a tool. Pass the tool's MCP `Context`.
+
+        @mcp.tool()
+        def run_query(sql: str, ctx: Context) -> str:
+            who = current_principal(ctx)
+            tables = who.policy.extra.get("tables", [])   # this key's data scope
+            ...
+
+    Returns None if the request didn't come through a Gatekeeper — a tool
+    that scopes data by caller should refuse in that case, not fall back to
+    "everything".
+    """
+    request = getattr(getattr(ctx, "request_context", None), "request", None)
+    state = (getattr(request, "scope", None) or {}).get("state") or {}
+    return state.get(STATE_KEY)
 
 # Matches the MCP Python SDK's own default. The body is buffered here before
 # the SDK sees it, so without a cap of our own the SDK's limit never applies.
@@ -102,6 +122,7 @@ class Gatekeeper:
         # to the key's tool allowlist.
         self.window_exempt = frozenset(window_exempt)
         self.max_body_bytes = max_body_bytes
+        self.limiter = Limiter()
 
     async def __call__(self, scope, receive, send):
         if scope["type"] != "http":
@@ -140,6 +161,10 @@ class Gatekeeper:
                              b'{"error":"Unauthorized",'
                              b'"message":"Valid x-api-key or Bearer token required"}')
             return
+
+        # Hand the caller to the tools. Whatever a client sent, this is set
+        # here, after validation — so a tool reading it sees the real key.
+        scope.setdefault("state", {})[STATE_KEY] = principal
 
         # Read the WHOLE body before replaying it. A single `await receive()`
         # silently TRUNCATES a chunked request body, which surfaces much later
@@ -184,14 +209,20 @@ class Gatekeeper:
                 return
 
             if req.get("method") == "tools/call":
-                denied = await self._check_call(req, principal, send)
+                denied, release = await self._check_call(req, principal, send)
                 if denied:
                     return
+                try:
+                    await self.app(scope, replay, send)
+                finally:
+                    release()           # frees the concurrency slot
+                return
 
         await self.app(scope, replay, send)
 
-    async def _check_call(self, req: dict, principal: Principal, send) -> bool:
-        """True if the call was refused and a response already sent."""
+    async def _check_call(self, req: dict, principal: Principal, send):
+        """(refused, release). If refused, a response was already sent;
+        otherwise `release()` must be called when the call finishes."""
         req_id = req.get("id", 1)
         params = req.get("params")
         tool = params.get("name", "unknown") if isinstance(params, dict) else "unknown"
@@ -206,7 +237,7 @@ class Gatekeeper:
         if window_error:
             await self._record(principal, "denied:window", window_error)
             await self._refuse(send, req_id, window_error)
-            return True
+            return True, None
 
         # ⚠️ This check used to sit inside a bare `except Exception: pass`, so
         # if it raised, the request proceeded UNGATED AND UNLOGGED. Explicit
@@ -222,17 +253,28 @@ class Gatekeeper:
                 send, req_id,
                 "ACCESS DENIED: you do not have permission to use '%s'. "
                 "Ask an admin to update your key." % tool)
-            return True
+            return True, None
+
+        # Rate and concurrency limits. Checked after the allowlist, so a call
+        # that was never allowed doesn't use up the key's quota.
+        limit_error, release = self.limiter.acquire(
+            principal.key_id, self.server_name, principal.policy)
+        if limit_error:
+            action = "denied:busy" if limit_error.startswith("BUSY") else "denied:rate"
+            await self._record(principal, action, tool)
+            await self._refuse(send, req_id, limit_error)
+            return True, None
 
         # An allowed call that cannot be recorded is refused. The whole point
         # of the audit log is that nothing runs without a line in it — the
         # original failure was a call that went through ungated AND unlogged.
         if not await self._record(principal, tool):
+            release()
             await self._refuse(send, req_id,
                                "UNAVAILABLE: the audit log could not be written, "
                                "so '%s' was not run. Try again shortly." % tool)
-            return True
-        return False
+            return True, None
+        return False, release
 
     async def _record(self, principal: Principal, action: str, details: str = "") -> bool:
         try:

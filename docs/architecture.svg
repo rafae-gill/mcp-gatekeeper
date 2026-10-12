@@ -1,6 +1,6 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 900 480" width="900" height="480" role="img" aria-labelledby="t d">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 900 532" width="900" height="532" role="img" aria-labelledby="t d">
   <title id="t">How a request passes through mcp-gatekeeper</title>
-  <desc id="d">An MCP client sends an HTTP request with a key. The gatekeeper checks the key, the body, the time window and the tool allowlist, writes an audit line, and only then forwards the call to the MCP server. Policy is read from the store on every request; admins change it without redeploying.</desc>
+  <desc id="d">An MCP client sends an HTTP request with a key. The gatekeeper checks the key, the body, the time window, the tool allowlist and the usage limits, writes an audit line, and only then forwards the call to the MCP server. Policy is read from the store on every request; admins change it without redeploying.</desc>
   <style>
     :root { --bg:#ffffff; --fg:#1f2328; --dim:#59636e; --line:#d1d9e0; --box:#f6f8fa; --gate:#ddf4ff; --gate-line:#54aeff; --deny:#cf222e; --ok:#1a7f37; }
     @media (prefers-color-scheme: dark) {
@@ -26,7 +26,7 @@
       <path d="M0,0 L10,5 L0,10 z" style="fill: var(--dim)"/>
     </marker>
   </defs>
-  <rect width="900" height="480" style="fill: var(--bg)"/>
+  <rect width="900" height="532" style="fill: var(--bg)"/>
 
   <!-- client -->
   <rect class="box" x="20" y="150" width="150" height="76" rx="8"/>
@@ -37,7 +37,7 @@
   <text class="dim" x="196" y="180" text-anchor="middle">+ key</text>
 
   <!-- gate -->
-  <rect class="gate" x="222" y="30" width="430" height="320" rx="10"/>
+  <rect class="gate" x="222" y="30" width="430" height="372" rx="10"/>
   <text class="h" x="242" y="58">Gatekeeper</text>
   <text class="dim" x="330" y="58">ASGI middleware, in front of every server</text>
 
@@ -64,8 +64,14 @@
 
     <rect class="step" x="242" y="284" width="250" height="42" rx="6"/>
     <circle class="num" cx="262" cy="305" r="10"/><text class="numt" x="262" y="309" text-anchor="middle">5</text>
-    <text class="s" x="282" y="310">Write the audit line</text>
-    <text class="deny" x="504" y="310">fails → refused</text>
+    <text class="s" x="282" y="310">Within the key's limits?</text>
+    <text class="deny" x="504" y="303">no → refused, logged</text>
+    <text class="dim" x="504" y="318">/min · /day · at once</text>
+
+    <rect class="step" x="242" y="336" width="250" height="42" rx="6"/>
+    <circle class="num" cx="262" cy="357" r="10"/><text class="numt" x="262" y="361" text-anchor="middle">6</text>
+    <text class="s" x="282" y="362">Write the audit line</text>
+    <text class="deny" x="504" y="362">fails → refused</text>
   </g>
 
   <!-- server -->
@@ -76,22 +82,22 @@
   <text class="dim" x="791" y="204" text-anchor="middle">the tools, unchanged</text>
 
   <!-- store / audit / admin -->
-  <rect class="box" x="250" y="398" width="180" height="62" rx="8"/>
-  <text class="h" x="340" y="425" text-anchor="middle">Store</text>
-  <text class="dim" x="340" y="445" text-anchor="middle">keys (hashed) · policy · invites</text>
-  <path class="dash" d="M300,398 L300,330"/>
-  <text class="dim" x="310" y="370">policy read on</text>
-  <text class="dim" x="310" y="385">every request</text>
+  <rect class="box" x="250" y="450" width="180" height="62" rx="8"/>
+  <text class="h" x="340" y="477" text-anchor="middle">Store</text>
+  <text class="dim" x="340" y="497" text-anchor="middle">keys (hashed) · policy · invites</text>
+  <path class="dash" d="M300,450 L300,382"/>
+  <text class="dim" x="310" y="422">policy read on</text>
+  <text class="dim" x="310" y="437">every request</text>
 
-  <rect class="box" x="462" y="398" width="180" height="62" rx="8"/>
-  <text class="h" x="552" y="425" text-anchor="middle">Audit log</text>
-  <text class="dim" x="552" y="445" text-anchor="middle">who · which tool · when · verdict</text>
-  <path class="dash" d="M440,330 L520,396"/>
+  <rect class="box" x="462" y="450" width="180" height="62" rx="8"/>
+  <text class="h" x="552" y="477" text-anchor="middle">Audit log</text>
+  <text class="dim" x="552" y="497" text-anchor="middle">who · which tool · when · verdict</text>
+  <path class="dash" d="M440,382 L520,448"/>
 
-  <rect class="box" x="20" y="398" width="180" height="62" rx="8"/>
-  <text class="h" x="110" y="425" text-anchor="middle">Admin</text>
-  <text class="dim" x="110" y="445" text-anchor="middle">grant · revoke · edit hours</text>
-  <path class="arrow" d="M200,429 L248,429"/>
-  <text class="dim" x="664" y="425">Changing someone's access is a</text>
-  <text class="dim" x="664" y="442">write to the store. No redeploy.</text>
+  <rect class="box" x="20" y="450" width="180" height="62" rx="8"/>
+  <text class="h" x="110" y="477" text-anchor="middle">Admin</text>
+  <text class="dim" x="110" y="497" text-anchor="middle">tools · data · hours · limits</text>
+  <path class="arrow" d="M200,481 L248,481"/>
+  <text class="dim" x="664" y="477">Changing someone's access is a</text>
+  <text class="dim" x="664" y="494">write to the store. No redeploy.</text>
 </svg>
