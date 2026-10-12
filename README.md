@@ -229,8 +229,8 @@ clicks in the same second minting two keys.
 
 ## Provenance
 
-Extracted from a system that has run in production for months — five MCP servers, roughly two
-dozen people, real production data. The comments marking bugs are not hypothetical;
+Extracted from a system that has run in production for months — five MCP servers, about 50
+people using it daily, real production data. The comments marking bugs are not hypothetical;
 each one cost something. The headline three:
 
 - a `# pass through for the handshake` branch that made **omitting the header a total auth
