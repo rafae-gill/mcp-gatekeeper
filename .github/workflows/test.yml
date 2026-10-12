@@ -22,8 +22,8 @@ jobs:
         mcp: ["mcp", "mcp>=1.10,<2"]
     name: py${{ matrix.python }} / ${{ matrix.mcp }}
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
         with:
           python-version: ${{ matrix.python }}
       - run: pip install -e ".[dev]" "${{ matrix.mcp }}" --upgrade
@@ -46,8 +46,8 @@ jobs:
     env:
       GK_TEST_POSTGRES_DSN: postgresql://postgres:postgres@localhost:5432/postgres
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.13"
       - run: pip install -e ".[dev]"
