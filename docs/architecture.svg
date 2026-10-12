@@ -1,0 +1,97 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 900 480" width="900" height="480" role="img" aria-labelledby="t d">
+  <title id="t">How a request passes through mcp-gatekeeper</title>
+  <desc id="d">An MCP client sends an HTTP request with a key. The gatekeeper checks the key, the body, the time window and the tool allowlist, writes an audit line, and only then forwards the call to the MCP server. Policy is read from the store on every request; admins change it without redeploying.</desc>
+  <style>
+    :root { --bg:#ffffff; --fg:#1f2328; --dim:#59636e; --line:#d1d9e0; --box:#f6f8fa; --gate:#ddf4ff; --gate-line:#54aeff; --deny:#cf222e; --ok:#1a7f37; }
+    @media (prefers-color-scheme: dark) {
+      :root { --bg:#0d1117; --fg:#e6edf3; --dim:#9198a1; --line:#3d444d; --box:#151b23; --gate:#0c2d4b; --gate-line:#1f6feb; --deny:#ff7b72; --ok:#3fb950; }
+    }
+    svg { background: var(--bg); }
+    text { font-family: -apple-system, "Segoe UI", Helvetica, Arial, sans-serif; fill: var(--fg); }
+    .dim { fill: var(--dim); font-size: 12px; }
+    .h { font-size: 15px; font-weight: 600; }
+    .s { font-size: 13px; }
+    .deny { fill: var(--deny); font-size: 12px; }
+    .ok { fill: var(--ok); font-size: 12px; font-weight: 600; }
+    .box { fill: var(--box); stroke: var(--line); stroke-width: 1.2; }
+    .gate { fill: var(--gate); stroke: var(--gate-line); stroke-width: 1.5; }
+    .step { fill: var(--bg); stroke: var(--gate-line); stroke-width: 1; }
+    .arrow { stroke: var(--dim); stroke-width: 1.5; fill: none; marker-end: url(#a); }
+    .dash { stroke: var(--dim); stroke-width: 1.2; fill: none; stroke-dasharray: 5 4; marker-end: url(#a); }
+    .num { fill: var(--gate-line); }
+    .numt { fill: #ffffff; font-size: 12px; font-weight: 700; }
+  </style>
+  <defs>
+    <marker id="a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" style="fill: var(--dim)"/>
+    </marker>
+  </defs>
+  <rect width="900" height="480" style="fill: var(--bg)"/>
+
+  <!-- client -->
+  <rect class="box" x="20" y="150" width="150" height="76" rx="8"/>
+  <text class="h" x="95" y="183" text-anchor="middle">MCP client</text>
+  <text class="dim" x="95" y="204" text-anchor="middle">agent · IDE · CLI</text>
+  <path class="arrow" d="M170,188 L218,188"/>
+  <text class="dim" x="196" y="166" text-anchor="middle">HTTP</text>
+  <text class="dim" x="196" y="180" text-anchor="middle">+ key</text>
+
+  <!-- gate -->
+  <rect class="gate" x="222" y="30" width="430" height="320" rx="10"/>
+  <text class="h" x="242" y="58">Gatekeeper</text>
+  <text class="dim" x="330" y="58">ASGI middleware, in front of every server</text>
+
+  <g>
+    <rect class="step" x="242" y="76" width="250" height="42" rx="6"/>
+    <circle class="num" cx="262" cy="97" r="10"/><text class="numt" x="262" y="101" text-anchor="middle">1</text>
+    <text class="s" x="282" y="102">Key valid for this server?</text>
+    <text class="deny" x="504" y="102">no → 401</text>
+
+    <rect class="step" x="242" y="128" width="250" height="42" rx="6"/>
+    <circle class="num" cx="262" cy="149" r="10"/><text class="numt" x="262" y="153" text-anchor="middle">2</text>
+    <text class="s" x="282" y="154">One readable JSON-RPC call?</text>
+    <text class="deny" x="504" y="154">no → 400</text>
+
+    <rect class="step" x="242" y="180" width="250" height="42" rx="6"/>
+    <circle class="num" cx="262" cy="201" r="10"/><text class="numt" x="262" y="205" text-anchor="middle">3</text>
+    <text class="s" x="282" y="206">Inside the key's hours?</text>
+    <text class="deny" x="504" y="206">no → refused, logged</text>
+
+    <rect class="step" x="242" y="232" width="250" height="42" rx="6"/>
+    <circle class="num" cx="262" cy="253" r="10"/><text class="numt" x="262" y="257" text-anchor="middle">4</text>
+    <text class="s" x="282" y="258">Tool on the key's allowlist?</text>
+    <text class="deny" x="504" y="258">no → refused, logged</text>
+
+    <rect class="step" x="242" y="284" width="250" height="42" rx="6"/>
+    <circle class="num" cx="262" cy="305" r="10"/><text class="numt" x="262" y="309" text-anchor="middle">5</text>
+    <text class="s" x="282" y="310">Write the audit line</text>
+    <text class="deny" x="504" y="310">fails → refused</text>
+  </g>
+
+  <!-- server -->
+  <path class="arrow" d="M652,188 L698,188"/>
+  <text class="ok" x="675" y="176" text-anchor="middle">allowed</text>
+  <rect class="box" x="702" y="150" width="178" height="76" rx="8"/>
+  <text class="h" x="791" y="183" text-anchor="middle">Your MCP server</text>
+  <text class="dim" x="791" y="204" text-anchor="middle">the tools, unchanged</text>
+
+  <!-- store / audit / admin -->
+  <rect class="box" x="250" y="398" width="180" height="62" rx="8"/>
+  <text class="h" x="340" y="425" text-anchor="middle">Store</text>
+  <text class="dim" x="340" y="445" text-anchor="middle">keys (hashed) · policy · invites</text>
+  <path class="dash" d="M300,398 L300,330"/>
+  <text class="dim" x="310" y="370">policy read on</text>
+  <text class="dim" x="310" y="385">every request</text>
+
+  <rect class="box" x="462" y="398" width="180" height="62" rx="8"/>
+  <text class="h" x="552" y="425" text-anchor="middle">Audit log</text>
+  <text class="dim" x="552" y="445" text-anchor="middle">who · which tool · when · verdict</text>
+  <path class="dash" d="M440,330 L520,396"/>
+
+  <rect class="box" x="20" y="398" width="180" height="62" rx="8"/>
+  <text class="h" x="110" y="425" text-anchor="middle">Admin</text>
+  <text class="dim" x="110" y="445" text-anchor="middle">grant · revoke · edit hours</text>
+  <path class="arrow" d="M200,429 L248,429"/>
+  <text class="dim" x="664" y="425">Changing someone's access is a</text>
+  <text class="dim" x="664" y="442">write to the store. No redeploy.</text>
+</svg>
