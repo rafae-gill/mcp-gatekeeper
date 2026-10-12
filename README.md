@@ -1,16 +1,43 @@
 # mcp-gatekeeper
 
-Per-person, per-tool, time-boxed, audited access to MCP servers.
+**Control which people can use which AI tools, and keep a record of who used what.**
+
+[MCP](https://modelcontextprotocol.io) servers give AI agents tools: run a SQL query, create
+an invoice, post to Slack. That's simple when it's just you on your laptop. Once a whole team
+shares those servers, simple questions come up that MCP doesn't answer:
+
+- **Who can use which tools?** Sam can query the warehouse but must not write to the ledger.
+- **When?** Not at 3 am, while the nightly data load is running.
+- **Who did what?** Someone created that invoice. Who?
+- **How do I cut someone off?** Right now, without redeploying anything.
+
+**mcp-gatekeeper answers them.** It sits in front of your MCP server. Every person gets their
+own key, and every tool call is checked against what that key allows before it runs:
+
+| The agent tries to… | What happens |
+|---|---|
+| call any tool without a valid key | `401`. Nothing runs. |
+| call a tool its key allows | It runs, and the call is logged. |
+| call a tool its key doesn't allow | Refused with a message the agent can pass on ("Ask an admin to update your key"), and logged. |
+| call a tool outside its allowed hours | Refused with the hours and timezone, and logged. |
 
 ![Demo: a key is issued through a claim link, then tool calls are allowed, refused and audited](docs/demo.gif)
 
-MCP's spec points at OAuth 2.1. That answers *who is calling*. It does not answer
-**which of the thirty tools on this server this person may invoke, at what hour, and what
-gets recorded afterwards** — which is the question you actually have once a server can write
-to a ledger or a warehouse.
+Access is just data on the key, so changing what someone can do is an update in the
+database, with no redeploy:
 
-Most MCP servers run over stdio on one laptop as one user with no auth at all. That is fine
-until it isn't.
+```jsonc
+"warehouse": { "tools": ["run_query", "describe_table"], "hours_from": 9, "hours_to": 18, "hours_tz": "UTC" }
+```
+
+**Who it's for:** teams running MCP servers over HTTP for more than one person, especially
+servers that can touch production data. If it's one person on stdio, you don't need this yet.
+
+**Why not just OAuth?** The MCP spec points to OAuth 2.1, which proves *who* is calling. It
+doesn't decide which of thirty tools that person may use, when, or what gets recorded. That
+part is still yours to build, and this is that part.
+
+## Add it to your server
 
 ```python
 from mcp.server.mcpserver import MCPServer      # mcp 1.x: mcp.server.fastmcp.FastMCP
@@ -31,9 +58,8 @@ app = Gatekeeper(
 uvicorn.run(app, host="0.0.0.0", port=8080)
 ```
 
-Now `GET /health` is open, everything else needs a valid key (`x-api-key: sk_…` or
-`Authorization: Bearer sk_…`), every `tools/call` is checked against that key's allowlist and
-time window, and every call — allowed or refused — is recorded.
+That's the whole integration: your tools don't change. Clients send their key as
+`x-api-key: sk_…` or `Authorization: Bearer sk_…`. `GET /health` stays open for uptime checks.
 
 > **Status: alpha.** Small, readable, tested against the MCP Python SDK 1.x and 2.x.
 > Maintained on a best-effort basis — it is a reference implementation to read and adapt,
