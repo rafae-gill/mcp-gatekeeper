@@ -20,9 +20,9 @@ DEFAULT_TZ = "UTC"
 def _lenient_int(d: dict, name: str) -> int:
     """Schedule and limit knobs: a typo means "knob off", never "locked out".
 
-    An earlier version ran plain int() here, so `"hours_from": "9am"` raised
-    during key validation and the key got a 401 on every request — the exact
-    outcome the fail-open schedule was meant to prevent, just one step earlier.
+    A plain int() here would turn `"hours_from": "9am"` into an error during key
+    validation, and a 401 on every request: exactly the lock-out a fail-open
+    schedule is meant to prevent.
     """
     v = d.get(name)
     if v in (None, ""):

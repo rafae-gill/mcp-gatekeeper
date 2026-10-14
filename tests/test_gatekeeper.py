@@ -1,4 +1,4 @@
-"""Tests, each one pinning a pitfall an MCP gateway can fall into.
+"""Tests, each one pinning a guarantee the gate gives.
 
 Run:  python -m pytest -q      (or just: python tests/test_gatekeeper.py)
 """
@@ -90,8 +90,7 @@ class EchoApp:
 # --------------------------------------------------------------------- auth --
 
 def test_missing_header_is_rejected():
-    """THE BYPASS. A pass-through for the MCP handshake when no key is supplied
-    would make omitting the header a total auth bypass."""
+    """No key means 401, with no exception for the MCP handshake."""
     store, _ = make_store()
     out = asyncio.run(call(Gatekeeper(EchoApp(), server_name="warehouse", store=store),
                            key=None, body=tool_call("run_query")))
@@ -150,8 +149,7 @@ def test_ungranted_tool_is_refused_as_jsonrpc_result():
 
 
 def test_tool_check_failing_denies_rather_than_passes():
-    """Inside a bare `except: pass`, a raise would let the request through
-    ungated AND unlogged."""
+    """If the permission check errors, the call is refused."""
     store, secret = make_store()
 
     class Boom(ServerPolicy):
@@ -194,7 +192,7 @@ def test_initialize_is_not_window_or_tool_checked():
 # -------------------------------------------------------------- body replay --
 
 def test_chunked_body_is_not_truncated():
-    """A single `await receive()` would silently truncate chunked requests."""
+    """A request that arrives in several chunks is checked and passed on whole."""
     store, secret = make_store()
     app = EchoApp()
     raw = json.dumps(tool_call("run_query")).encode()
@@ -597,8 +595,8 @@ def test_limits_are_read_live_from_the_key():
 # ------------------------------------------------- typos fail soft, not shut --
 
 def test_unreadable_schedule_does_not_lock_the_key_out():
-    """`"hours_from": "9am"` used to raise during key validation: a 401 on
-    every request, from a field that is documented to fail OPEN."""
+    """A typo like `"hours_from": "9am"` must not lock the key out: the
+    schedule is documented to fail OPEN."""
     store = MemoryStore()
     secret, _ = mint_key(store, name="T", email="t@example.com", permissions={
         "warehouse": {"tools": ["run_query"], "hours_from": "9am", "hours_to": 17,

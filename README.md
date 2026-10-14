@@ -25,7 +25,8 @@ follows the new rules. Nothing is redeployed.
 
 ## Built from a real deployment
 
-Built from patterns I use running MCP servers for a team. Each person's key
+Built from patterns used in a real company environment, where a set of MCP servers is shared
+by about 50 people. Each person's key
 decides which tools they get, which warehouse views they can query, when, and how often, and
 every call lands in an audit log. Changing someone's access takes seconds and no deploy.
 
@@ -322,14 +323,14 @@ clicks in the same second minting two keys.
   job, using the key's policy (see "Scoping data per person" above).
 - **Not multi-tenant.** No notion of organizations.
 
-## Lessons built into this
+## Guarantees, each pinned by a test
 
-Three mistakes that are easy to make in an MCP gateway, each pinned by a test:
-
-- a handshake **pass-through branch** that lets a request skip auth when the header is missing
-- a single `await receive()` that silently **truncates chunked request bodies**
-- a permission check inside a bare `except: pass`, so an error lets the request through
-  **unchecked and unlogged**
+- **Every request needs a valid key.** A missing key and a wrong key get the same 401, with no
+  exception for the MCP handshake.
+- **The whole request is checked.** The body is read in full before it's inspected, however the
+  client splits it up.
+- **Failure means "no".** If a permission check or the audit log can't complete, the call is
+  refused, never let through.
 
 `tests/test_gatekeeper.py` pins all three, and the rest of the rules above.
 `tests/test_with_mcp_sdk.py` runs the gate in front of a real SDK server, and CI runs the
