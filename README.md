@@ -62,6 +62,18 @@ doesn't decide which of thirty tools that person may use, which data they see, w
 often, and it doesn't record what they did. That part is still yours to build, and this is that
 part.
 
+**Pairs with [mcp-tool-rag](https://github.com/rafae-gill/mcp-tool-rag).** This gate decides
+what each person may *call*. Its companion decides what each person's agent gets to *see*:
+it reads the same per-key policies and hands the agent only the few tools that are relevant
+to the request and allowed for that key. Hidden in one place, refused in the other: two
+layers of defence. Each works on its own.
+
+| | mcp-gatekeeper (this repo) | mcp-tool-rag |
+|---|---|---|
+| Stores each person's permissions | ✅ source of truth | reads them |
+| Decides which tools the agent **sees** | | ✅ only relevant, allowed ones |
+| Blocks a forbidden **call** | ✅ refuses and logs it | |
+
 ## Add it to your server
 
 ```python
