@@ -1,8 +1,7 @@
 """Where keys and invites live.
 
-Deliberately an interface. The original of this code was welded to one cloud
-datastore, which made it unusable anywhere else — the single biggest barrier to
-reuse. Everything the gatekeeper needs is eight methods.
+Deliberately an interface, so the gatekeeper isn't welded to one datastore.
+Everything it needs is eight methods.
 
 Two implementations ship here: `MemoryStore` for tests and `JsonFileStore` for
 small real deployments. A Firestore/Postgres/Dynamo adapter is the same eight

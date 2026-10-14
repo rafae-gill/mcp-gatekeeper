@@ -1,4 +1,4 @@
-"""Tests, each one pinning a bug that actually happened.
+"""Tests, each one pinning a pitfall an MCP gateway can fall into.
 
 Run:  python -m pytest -q      (or just: python tests/test_gatekeeper.py)
 """
@@ -90,8 +90,8 @@ class EchoApp:
 # --------------------------------------------------------------------- auth --
 
 def test_missing_header_is_rejected():
-    """THE BYPASS. An earlier version passed through when no key was supplied,
-    for the MCP handshake. Omitting the header was total auth bypass."""
+    """THE BYPASS. A pass-through for the MCP handshake when no key is supplied
+    would make omitting the header a total auth bypass."""
     store, _ = make_store()
     out = asyncio.run(call(Gatekeeper(EchoApp(), server_name="warehouse", store=store),
                            key=None, body=tool_call("run_query")))
@@ -150,8 +150,8 @@ def test_ungranted_tool_is_refused_as_jsonrpc_result():
 
 
 def test_tool_check_failing_denies_rather_than_passes():
-    """The check once lived inside a bare `except: pass`, so a raise meant the
-    request proceeded ungated AND unlogged."""
+    """Inside a bare `except: pass`, a raise would let the request through
+    ungated AND unlogged."""
     store, secret = make_store()
 
     class Boom(ServerPolicy):
@@ -194,7 +194,7 @@ def test_initialize_is_not_window_or_tool_checked():
 # -------------------------------------------------------------- body replay --
 
 def test_chunked_body_is_not_truncated():
-    """A single `await receive()` silently truncated chunked requests."""
+    """A single `await receive()` would silently truncate chunked requests."""
     store, secret = make_store()
     app = EchoApp()
     raw = json.dumps(tool_call("run_query")).encode()

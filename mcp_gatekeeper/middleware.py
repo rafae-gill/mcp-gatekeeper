@@ -4,8 +4,8 @@ Wrap any streamable-HTTP MCP app. Every request is authenticated; every
 `tools/call` is additionally checked against the key's time window and tool
 allowlist, then recorded.
 
-Almost every comment below marks a bug that actually happened in production.
-They are kept because the reasoning is the valuable part.
+The comments below mark pitfalls that are easy to fall into in an MCP gateway;
+each one is guarded against here and pinned by a test.
 """
 from __future__ import annotations
 
@@ -27,8 +27,8 @@ async def _offload(fn, *args):
     Store and audit calls are plain sync functions. Called directly from this
     async middleware, a network round-trip to a real database would block the
     event loop and serialize every concurrent request behind it — the same
-    trap as a blocking driver inside an `async def` tool, which cost the
-    original system most of its throughput.
+    trap as a blocking driver inside an `async def` tool, a common mistake
+    that can cost most of your throughput.
     """
     try:
         import anyio.to_thread          # present wherever the MCP SDK is
@@ -152,10 +152,10 @@ class Gatekeeper:
                 principal = None
 
         # ⚠️ There is deliberately NO "no key provided -> pass through" branch.
-        # An earlier version of this had one, for the MCP handshake. It meant
-        # OMITTING the header was a complete auth bypass — only an *invalid* key
-        # was rejected, so every tool on the server was reachable
-        # unauthenticated. A missing key and a bad key get the same 401.
+        # A pass-through for the MCP handshake is a tempting shortcut, and it
+        # would make OMITTING the header a complete auth bypass: only an
+        # *invalid* key would be rejected, so every tool on the server would be
+        # reachable unauthenticated. A missing key and a bad key get the same 401.
         if principal is None:
             await self._json(send, 401,
                              b'{"error":"Unauthorized",'
@@ -239,9 +239,9 @@ class Gatekeeper:
             await self._refuse(send, req_id, window_error)
             return True, None
 
-        # ⚠️ This check used to sit inside a bare `except Exception: pass`, so
-        # if it raised, the request proceeded UNGATED AND UNLOGGED. Explicit
-        # now, and it fails closed.
+        # ⚠️ Guards against wrapping this in a bare `except Exception: pass`:
+        # if the check raised, the request would proceed UNGATED AND UNLOGGED.
+        # It's explicit, and it fails closed.
         try:
             allowed = principal.grants(tool)
         except Exception as e:
@@ -266,8 +266,8 @@ class Gatekeeper:
             return True, None
 
         # An allowed call that cannot be recorded is refused. The whole point
-        # of the audit log is that nothing runs without a line in it — the
-        # original failure was a call that went through ungated AND unlogged.
+        # of the audit log is that nothing runs without a line in it — the worst
+        # failure for a gate is a call that goes through ungated AND unlogged.
         if not await self._record(principal, tool):
             release()
             await self._refuse(send, req_id,

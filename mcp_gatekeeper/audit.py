@@ -5,9 +5,9 @@ table you can query in production, an append-only log where compliance can read
 it.
 
 What matters is that a refusal is recorded as loudly as a success. A denied call
-is the one you most want to see afterwards, and the version of this code that
-swallowed its permission check also swallowed the audit line — so the requests
-that got through ungated left no trace at all.
+is the one you most want to see afterwards. Code that swallows its permission
+check tends to swallow the audit line too, and then the requests that get
+through ungated leave no trace at all.
 """
 from __future__ import annotations
 

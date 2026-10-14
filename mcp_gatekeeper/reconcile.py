@@ -1,7 +1,7 @@
 """Catch the gap between what a server SERVES and what you can GRANT.
 
-This exists because of a specific production failure, and it is the one piece
-here that is not standard practice.
+This guards against a quiet failure, and it is the one piece here that is not
+standard practice.
 
 If access is granted from a registry — a dashboard, a config file, a seed
 script — that registry lists tool names. A tool added to the server but not to
@@ -14,8 +14,8 @@ That combination is nasty:
   * it is refused for everyone else, as a permission error at call time;
   * nothing fails at deploy, nothing logs at startup.
 
-Ours went unnoticed for weeks. It was found when a colleague on a normal key
-ran the same workflow and the state writes silently did nothing.
+A gap like this can go unnoticed for weeks, until someone on a normal key runs
+the same workflow and the calls are refused.
 
 The inverse — a name in the registry that the server does not serve — is
 harmless: the grant simply never matches. So the check is deliberately
@@ -73,7 +73,7 @@ def assert_grantable(served: list[str], grantable: list[str]) -> None:
     """Raise if any served tool cannot be granted. Call it at startup or in CI.
 
     Cheap enough to run on every boot, and it turns a permission error that
-    surfaces weeks later for one unlucky colleague into a failure at the moment
+    could surface weeks later for one unlucky user into a failure at the moment
     the tool was added.
     """
     r = reconcile(served, grantable)

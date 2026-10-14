@@ -25,8 +25,7 @@ follows the new rules. Nothing is redeployed.
 
 ## Built from a real deployment
 
-This is the open-source core of a platform running in production: five MCP servers, including
-one in front of a Redshift data warehouse, used every day by about 50 people. Each person's key
+Built from patterns I use running MCP servers for a team. Each person's key
 decides which tools they get, which warehouse views they can query, when, and how often, and
 every call lands in an audit log. Changing someone's access takes seconds and no deploy.
 
@@ -212,9 +211,9 @@ secret = claim_invite(store, token, verified_email_from_your_idp)   # once, ever
 - **No resend.** Only the token hash is kept, so the original link genuinely can't be
   reconstructed. Revoke and re-issue. That's the guarantee, not a limitation.
 
-> The design bit its author: a bulk-issue script created the invites, then crashed before
-> writing the links to disk. They were unrecoverable, exactly as intended, and the whole batch
-> had to be revoked and redone.
+> Plan for this: a bulk-issue script that crashes after creating invites but before saving
+> the links loses them for good, exactly as designed. Write each link out as soon as it's
+> created; if they're lost, revoke the batch and re-issue.
 
 ### 3. Reconcile what you serve against what you can grant
 
@@ -233,8 +232,9 @@ SERVED BUT NOT GRANTABLE (2) — nobody without a wildcard can call these:
     write_result, attach_file
 ```
 
-Ours went unnoticed for weeks and was found when a colleague on a normal key ran the same
-workflow and the writes silently did nothing. The check is asymmetric on purpose: a name in
+A gap like this can go unnoticed for weeks: the person who added the tool usually holds the
+wildcard, so it works for them and fails only for colleagues on normal keys. The check is
+asymmetric on purpose: a name in
 the registry that isn't served is harmless, so only the dangerous direction fails a build.
 
 ## Design notes
@@ -284,8 +284,8 @@ WHERE server = 'ledger' AND action LIKE 'denied:%' ORDER BY at DESC;
 ```
 
 Store and audit calls run on worker threads, never on the event loop — a blocking database
-call inside async code serializes every concurrent request, which is the mistake that cost the
-original system most of its throughput. And an allowed call that can't be written to the audit
+call inside async code serializes every concurrent request, a common mistake that can cost
+most of your throughput. And an allowed call that can't be written to the audit
 log is refused: nothing runs without a line in the log.
 
 Writing your own (Firestore, DynamoDB, …) is eight methods, and
@@ -322,17 +322,14 @@ clicks in the same second minting two keys.
   job, using the key's policy (see "Scoping data per person" above).
 - **Not multi-tenant.** No notion of organizations.
 
-## Provenance
+## Lessons built into this
 
-Extracted from a system that has run in production for months — five MCP servers, about 50
-people using it daily, real production data. The comments marking bugs are not hypothetical;
-each one cost something. The headline three:
+Three mistakes that are easy to make in an MCP gateway, each pinned by a test:
 
-- a `# pass through for the handshake` branch that made **omitting the header a total auth
-  bypass**
-- a single `await receive()` that silently **truncated chunked request bodies**
-- a permission check inside a bare `except: pass`, so a raise meant the request proceeded
-  **ungated and unlogged**
+- a handshake **pass-through branch** that lets a request skip auth when the header is missing
+- a single `await receive()` that silently **truncates chunked request bodies**
+- a permission check inside a bare `except: pass`, so an error lets the request through
+  **unchecked and unlogged**
 
 `tests/test_gatekeeper.py` pins all three, and the rest of the rules above.
 `tests/test_with_mcp_sdk.py` runs the gate in front of a real SDK server, and CI runs the
